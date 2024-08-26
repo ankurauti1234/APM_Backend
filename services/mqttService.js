@@ -1,6 +1,6 @@
 const awsIot = require("aws-iot-device-sdk-v2");
 const mqtt = awsIot.mqtt;
-const mqttConfig = require("../config/mqtt");
+const config = require("../config/mqtt"); // Adjusted import based on provided structure
 const DeviceData = require("../models/deviceData");
 const Logo = require("../models/logo");
 // const Fingerprint = require("../models/fingerprint");
@@ -8,24 +8,24 @@ const Logo = require("../models/logo");
 let client;
 
 async function connectToAWS() {
-  const config =
+  const configOptions =
     awsIot.iot.AwsIotMqttConnectionConfigBuilder.new_mtls_builder_from_path(
-      mqttConfig.certPath,
-      mqttConfig.keyPath
+      config.certPath,
+      config.keyPath
     )
-      .with_certificate_authority_from_path(undefined, mqttConfig.caPath)
+      .with_certificate_authority_from_path(undefined, config.caPath)
       .with_clean_session(true)
-      .with_client_id(mqttConfig.clientId)
-      .with_endpoint(mqttConfig.endpoint)
+      .with_client_id(config.clientId)
+      .with_endpoint(config.endpoint)
       .build();
 
   const client = new mqtt.MqttClient();
-  const connection = client.new_connection(config);
+  const connection = client.new_connection(configOptions);
 
   await connection.connect();
   console.log("Connected to AWS IoT");
 
-  for (const topic of mqttConfig.topicsToSubscribe) {
+  for (const topic of config.topicsToSubscribe) {
     await connection.subscribe(
       topic,
       mqtt.QoS.AtLeastOnce,
@@ -58,18 +58,16 @@ async function handleMessage(topic, payload) {
       return;
     }
 
-    // console.log(`Received message on topic ${topic}:`, message);
-
     switch (topic) {
       case "apm/device/data":
         await DeviceData.create(message);
         break;
       case "apm/logo":
-        console.log(message)
-        await Logo.create( message );
+        console.log(message);
+        await Logo.create(message);
         break;
       // case "apm/fp":
-      //   await Fingerprint.create( message);
+      //   await Fingerprint.create(message);
       //   break;
       default:
         console.log(`Unhandled topic: ${topic}`);
