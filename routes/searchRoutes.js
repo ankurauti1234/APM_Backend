@@ -3,8 +3,9 @@ const mongoose = require("mongoose");
 const Logo = require("../models/logo"); // Ensure you require the Logo model
 const Fingerprint = require("../models/fingerprint");
 const Config = require("../models/configModel");
-const router = express.Router();
 const Device = require("../models/deviceData"); // Adjust the path as necessary
+const router = express.Router();
+const SelfInstall = require("../models/selfInstallation");
 
 // Global search endpoint
 router.get("/all", async (req, res) => {
@@ -66,11 +67,11 @@ router.get("/all", async (req, res) => {
       query["CONFIGURATION.hardware_version"] = hw;
     }
 
-    // Fetch all devices based on the query
+    // Fetch all devices based on the query and sort by LOCATION.TS descending
     const devices =
       Object.keys(query).length === 0
-        ? await Device.find()
-        : await Device.find(query);
+        ? await Device.find().sort({ "LOCATION.TS": -1 })
+        : await Device.find(query).sort({ "LOCATION.TS": -1 });
 
     // Get all device IDs to fetch corresponding data
     const deviceIds = devices.map((device) => device.DEVICE_ID);
@@ -128,6 +129,7 @@ router.get("/all", async (req, res) => {
 
       return {
         DEVICE_ID: device.DEVICE_ID,
+        TS: device.LOCATION?.TS,
         lat: device.LOCATION?.Cell_Info?.lat,
         lon: device.LOCATION?.Cell_Info?.lon,
         hhid: device.METER_INSTALLATION?.HHID,
@@ -152,13 +154,15 @@ router.get("/all", async (req, res) => {
       };
     });
 
-    res.json(results);
+    // Sort the results by TS in descending order
+    const sortedResults = results.sort((a, b) => b.TS - a.TS);
+
+    res.json(sortedResults);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "An error occurred while fetching data." });
   }
 });
-
 
 
 router.get("/latest", async (req, res) => {
@@ -220,77 +224,80 @@ router.get("/latest", async (req, res) => {
 
     // Fetch the latest document for each DEVICE_ID matching the criteria
     const latestDevices = await Device.aggregate([
-      { $match: matchQuery }, // Match the query criteria
-      { $sort: { ts: -1 } }, // Sort by timestamp in descending order (assuming 'ts' is your timestamp field)
+      { $match: matchQuery },
+      { $sort: { ts: -1 } },
       {
         $group: {
-          _id: "$DEVICE_ID", // Group by DEVICE_ID
-          latestRecord: { $first: "$$ROOT" }, // Get the first (latest) record per group
+          _id: "$DEVICE_ID",
+          latestRecord: { $first: "$$ROOT" },
         },
       },
       {
         $lookup: {
           from: "AFPResult",
           localField: "latestRecord.DEVICE_ID",
-          foreignField: "device_id", // Ensure this matches the field in AFPResult collection
+          foreignField: "device_id",
           as: "AFPResult",
-          pipeline: [
-            { $sort: { time: -1 } }, // Sort by time in descending order
-            { $limit: 1 }, // Get the latest entry
-          ],
+          pipeline: [{ $sort: { time: -1 } }, { $limit: 1 }],
         },
       },
       {
         $lookup: {
           from: "logos",
           localField: "latestRecord.DEVICE_ID",
-          foreignField: "device_id", // Ensure this matches the field in logos collection
+          foreignField: "device_id",
           as: "LogoResult",
-          pipeline: [
-            { $sort: { ts: -1 } }, // Sort by ts (timestamp) in descending order
-            { $limit: 1 }, // Get the latest entry
-          ],
+          pipeline: [{ $sort: { ts: -1 } }, { $limit: 1 }],
         },
       },
       {
         $lookup: {
           from: "Accuracy",
           localField: "latestRecord.DEVICE_ID",
-          foreignField: "deviceId", // Ensure this matches the field in Accuracy collection
+          foreignField: "deviceId",
           as: "Accuracy",
-          pipeline: [
-            { $sort: { Timestamp: -1 } }, // Sort by Timestamp in descending order
-            { $limit: 1 }, // Get the single latest entry per device
-          ],
+          pipeline: [{ $sort: { Timestamp: -1 } }, { $limit: 1 }],
+        },
+      },
+      {
+        $addFields: {
+          "latestRecord.AFPResult": { $arrayElemAt: ["$AFPResult", 0] },
+          "latestRecord.LogoResult": { $arrayElemAt: ["$LogoResult", 0] },
+          "latestRecord.Accuracy": { $arrayElemAt: ["$Accuracy", 0] },
         },
       },
       {
         $lookup: {
           from: "logo-images",
           let: {
-            logoChannelName: { $arrayElemAt: ["$Accuracy.Channel_ID", 0] }, // Get Channel_ID from Accuracy
+            accuracyChannelId: "$latestRecord.Accuracy.Channel_ID",
+            logoChannelId: "$latestRecord.LogoResult.Channel_ID",
+            afpChannelId: "$latestRecord.AFPResult.Channel_ID",
           },
           pipeline: [
             {
               $match: {
-                $expr: { $eq: ["$channel_name", "$$logoChannelName"] }, // Match Channel_ID from Accuracy
+                $expr: {
+                  $or: [
+                    { $eq: ["$channel_name", "$$accuracyChannelId"] },
+                    { $eq: ["$channel_name", "$$logoChannelId"] },
+                    { $eq: ["$channel_name", "$$afpChannelId"] },
+                  ],
+                },
               },
             },
-            { $project: { _id: 0, images: 1 } },
+            { $project: { _id: 0, channel_name: 1, images: 1 } },
           ],
           as: "Images",
         },
       },
       {
         $addFields: {
-          "latestRecord.AFPResult": { $arrayElemAt: ["$AFPResult", 0] }, // Get the latest AFPResult
-          "latestRecord.LogoResult": { $arrayElemAt: ["$LogoResult", 0] }, // Get the latest LogoResult
-          "latestRecord.Accuracy": { $arrayElemAt: ["$Accuracy", 0] }, // Get the latest unique Accuracy entry
-          "latestRecord.Images": { $arrayElemAt: ["$Images", 0] }, // Get the latest logo-images
+          "latestRecord.Images": "$Images",
         },
       },
       {
-        $replaceRoot: { newRoot: "$latestRecord" }, // Replace root with latest document
+        $replaceRoot: { newRoot: "$latestRecord" },
       },
       {
         $project: {
@@ -325,21 +332,41 @@ router.get("/latest", async (req, res) => {
           afpResult: {
             channelId: "$AFPResult.Channel_ID",
             time: "$AFPResult.time",
+            images: {
+              $filter: {
+                input: "$Images",
+                as: "img",
+                cond: { $eq: ["$$img.channel_name", "$AFPResult.Channel_ID"] },
+              },
+            },
           },
           logoResult: {
             channelName: "$LogoResult.Channel_ID",
             accuracy: "$LogoResult.accuracy",
             ts: "$LogoResult.ts",
+            images: {
+              $filter: {
+                input: "$Images",
+                as: "img",
+                cond: { $eq: ["$$img.channel_name", "$LogoResult.Channel_ID"] },
+              },
+            },
           },
           accuracyResult: {
             audio_logo: "$Accuracy.AFPResult",
             logo_logo: "$Accuracy.LogoResult",
             priority: "$Accuracy.Priority",
             ts: "$Accuracy.Timestamp",
-            channelId: "$Accuracy.Channel_ID", // Include Channel_ID
-            accuracyTimestamp: "$Accuracy.Timestamp", // Include Timestamp
+            channelId: "$Accuracy.Channel_ID",
+            accuracyTimestamp: "$Accuracy.Timestamp",
+            images: {
+              $filter: {
+                input: "$Images",
+                as: "img",
+                cond: { $eq: ["$$img.channel_name", "$Accuracy.Channel_ID"] },
+              },
+            },
           },
-          images: "$Images.images", // Include images array
         },
       },
     ]);
@@ -375,55 +402,32 @@ router.get("/live", async (req, res) => {
     let matchQuery = {};
 
     // Build the match query based on provided parameters
-    if (deviceId) {
-      matchQuery["DEVICE_ID"] = Number(deviceId);
-    }
-
+    if (deviceId) matchQuery["DEVICE_ID"] = Number(deviceId);
     if (lat && lon) {
       matchQuery["LOCATION.Cell_Info.lat"] = Number(lat);
       matchQuery["LOCATION.Cell_Info.lon"] = Number(lon);
     }
-
-    if (online !== undefined) {
+    if (online !== undefined)
       matchQuery["NETWORK_LATCH.Ip_up"] = online === "true";
-    }
-
-    if (hhid) {
-      matchQuery["METER_INSTALLATION.HHID"] = hhid;
-    }
-
-    if (locationInstalling !== undefined) {
+    if (hhid) matchQuery["METER_INSTALLATION.HHID"] = hhid;
+    if (locationInstalling !== undefined)
       matchQuery["LOCATION.Installing"] = locationInstalling === "true";
-    }
-
-    if (sim) {
-      matchQuery["NETWORK_LATCH.Sim"] = sim;
-    }
-
-    if (installation !== undefined) {
+    if (sim) matchQuery["NETWORK_LATCH.Sim"] = sim;
+    if (installation !== undefined)
       matchQuery["METER_INSTALLATION.Success"] = installation === "true";
-    }
-
-    if (hw) {
-      matchQuery["CONFIGURATION.hardware_version"] = hw;
-    }
+    if (hw) matchQuery["CONFIGURATION.hardware_version"] = hw;
 
     // Fetch all documents matching the criteria
     const deviceData = await Device.aggregate([
-      { $match: matchQuery }, // Match the query criteria
-
-      { $limit: 1 }, // Limit to a single device
-
+      { $match: matchQuery },
+      { $limit: 1 },
       {
         $lookup: {
           from: "AFPResult",
           localField: "DEVICE_ID",
           foreignField: "device_id",
           as: "AFPResults",
-          pipeline: [
-            { $sort: { time: -1 } }, // Sort AFPResult by time in descending order
-            { $limit: 10 }, // Limit to the latest 10 results
-          ],
+          pipeline: [{ $sort: { time: -1 } }, { $limit: 10 }],
         },
       },
       {
@@ -432,10 +436,7 @@ router.get("/live", async (req, res) => {
           localField: "DEVICE_ID",
           foreignField: "device_id",
           as: "LogoResults",
-          pipeline: [
-            { $sort: { ts: -1 } }, // Sort LogoResult by ts (timestamp) in descending order
-            { $limit: 10 }, // Limit to the latest 10 results
-          ],
+          pipeline: [{ $sort: { ts: -1 } }, { $limit: 10 }],
         },
       },
       {
@@ -444,27 +445,32 @@ router.get("/live", async (req, res) => {
           localField: "DEVICE_ID",
           foreignField: "deviceId",
           as: "AccuracyResults",
-          pipeline: [
-            { $sort: { Timestamp: -1 } }, // Sort Accuracy by Timestamp in descending order
-            { $limit: 1 }, // Limit to the latest result
-          ],
+          pipeline: [{ $sort: { Timestamp: -1 } }, { $limit: 1 }],
         },
       },
       {
         $lookup: {
           from: "logo-images",
           let: {
+            afpChannelIds: "$AFPResults.Channel_ID",
+            logoChannelIds: "$LogoResults.Channel_ID",
             accuracyChannelId: {
-              $arrayElemAt: ["$AccuracyResults.Channel_ID", 0], // Extract the Channel_ID from Accuracy
+              $arrayElemAt: ["$AccuracyResults.Channel_ID", 0],
             },
           },
           pipeline: [
             {
               $match: {
-                $expr: { $eq: ["$channel_name", "$$accuracyChannelId"] },
+                $expr: {
+                  $or: [
+                    { $in: ["$channel_name", "$$afpChannelIds"] },
+                    { $in: ["$channel_name", "$$logoChannelIds"] },
+                    { $eq: ["$channel_name", "$$accuracyChannelId"] },
+                  ],
+                },
               },
             },
-            { $project: { _id: 0, images: 1 } },
+            { $project: { _id: 0, channel_name: 1, images: 1 } },
           ],
           as: "Images",
         },
@@ -507,10 +513,72 @@ router.get("/live", async (req, res) => {
           meterOtaPrevious: "$METER_OTA.previous",
           meterOtaUpdate: "$METER_OTA.update",
           meterOtaSuccess: "$METER_OTA.success",
-          afpResults: "$AFPResults",
-          logoResults: "$LogoResults",
-          accuracyResults: "$AccuracyResults",
-          images: "$Images.images",
+          afpResults: {
+            $map: {
+              input: "$AFPResults",
+              as: "afp",
+              in: {
+                $mergeObjects: [
+                  "$$afp",
+                  {
+                    images: {
+                      $filter: {
+                        input: "$Images",
+                        as: "img",
+                        cond: {
+                          $eq: ["$$img.channel_name", "$$afp.Channel_ID"],
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+          logoResults: {
+            $map: {
+              input: "$LogoResults",
+              as: "logo",
+              in: {
+                $mergeObjects: [
+                  "$$logo",
+                  {
+                    images: {
+                      $filter: {
+                        input: "$Images",
+                        as: "img",
+                        cond: {
+                          $eq: ["$$img.channel_name", "$$logo.Channel_ID"],
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+          accuracyResults: {
+            $map: {
+              input: "$AccuracyResults",
+              as: "accuracy",
+              in: {
+                $mergeObjects: [
+                  "$$accuracy",
+                  {
+                    images: {
+                      $filter: {
+                        input: "$Images",
+                        as: "img",
+                        cond: {
+                          $eq: ["$$img.channel_name", "$$accuracy.Channel_ID"],
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
         },
       },
     ]);
@@ -524,6 +592,46 @@ router.get("/live", async (req, res) => {
     res.json(deviceData[0]); // Since we are limiting to 1 device, return the first element
   } catch (error) {
     console.error("Error fetching data:", error);
+    res.status(500).json({ error: "An error occurred while fetching data." });
+  }
+});
+
+
+router.get("/self-installation", async (req, res) => {
+  try {
+    const deviceId = Number(req.query.deviceId);
+
+    if (!deviceId) {
+      return res
+        .status(400)
+        .json({ message: "device_id query parameter is required." });
+    }
+
+    // Query the SelfInstall collection based on device_id
+    const selfInstallationData = await SelfInstall.findOne({
+      device_id: deviceId,
+    });
+
+    if (!selfInstallationData) {
+      return res
+        .status(404)
+        .json({ message: "No data found for this device ID." });
+    }
+
+    // Map the response to short field names
+    const response = {
+      id: selfInstallationData._id,
+      did: selfInstallationData.device_id,
+      hhid: selfInstallationData.HHID,
+      imsi: selfInstallationData["SIM{current_sim}_IMSI"],
+      sim1_pass: selfInstallationData["SIM{current_sim}_PASS"],
+      sim2_pass: selfInstallationData["SIM{other_sim}_PASS"],
+      createdAt: selfInstallationData.createdAt, // Include createdAt in the response
+    };
+
+    res.json(response);
+  } catch (error) {
+    console.error("Error fetching self-installation data:", error);
     res.status(500).json({ error: "An error occurred while fetching data." });
   }
 });
@@ -889,7 +997,7 @@ router.get("/devices/alerts", async (req, res) => {
 // GET /config - Fetch the latest data for all devices
 router.get("/config", async (req, res) => {
   try {
-    // Step 1: Fetch the latest records for all devices
+    // Fetch the latest records for all devices
     const latestDevices = await Device.aggregate([
       { $sort: { ts: -1 } },
       { $group: { _id: "$DEVICE_ID", latestRecord: { $first: "$$ROOT" } } },
@@ -898,7 +1006,7 @@ router.get("/config", async (req, res) => {
 
     console.log("Latest Devices:", latestDevices);
 
-    // Step 2: Get the latest configuration data for each device
+    // Fetch the latest configuration data for each device
     const latestConfigurations = await Config.aggregate([
       { $sort: { ts: -1 } },
       { $group: { _id: "$deviceId", latestConfig: { $first: "$$ROOT" } } },
@@ -907,7 +1015,7 @@ router.get("/config", async (req, res) => {
 
     console.log("Latest Configurations:", latestConfigurations);
 
-    // Step 3: Combine device data with configuration data
+    // Combine device data with configuration data
     const results = latestDevices.map((device) => {
       const config = latestConfigurations.find(
         (conf) => conf.deviceId === device.DEVICE_ID
@@ -934,11 +1042,13 @@ router.get("/config", async (req, res) => {
 });
 
 
+
+
 router.get("/config/:deviceId", async (req, res) => {
   try {
     const { deviceId } = req.params;
 
-    // Step 1: Fetch the latest record for the specified device
+    // Fetch the latest record for the specified device
     const latestDevice = await Device.findOne({ DEVICE_ID: deviceId }).sort({
       ts: -1,
     });
@@ -947,10 +1057,10 @@ router.get("/config/:deviceId", async (req, res) => {
       return res.status(404).json({ message: "Device not found." });
     }
 
-    // Step 2: Get the configuration data for the specified device
+    // Get the configuration data for the specified device
     const configuration = await Config.findOne({ deviceId });
 
-    // Step 3: Combine device data with configuration data
+    // Combine device data with configuration data
     const result = {
       DEVICE_ID: latestDevice.DEVICE_ID,
       hhid: latestDevice.METER_INSTALLATION?.HHID,
@@ -967,5 +1077,7 @@ router.get("/config/:deviceId", async (req, res) => {
       .json({ error: "An error occurred while fetching the data." });
   }
 });
+
+
 
 module.exports = router;

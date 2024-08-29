@@ -3,7 +3,7 @@ const mqtt = awsIot.mqtt;
 const config = require("../config/mqtt"); // Adjusted import based on provided structure
 const DeviceData = require("../models/deviceData");
 const Logo = require("../models/logo");
-// const Fingerprint = require("../models/fingerprint");
+const SelfInstall = require("../models/selfInstallation");
 
 let client;
 
@@ -25,7 +25,9 @@ async function connectToAWS() {
   await connection.connect();
   console.log("Connected to AWS IoT");
 
+  // Add logging for each topic being subscribed to
   for (const topic of config.topicsToSubscribe) {
+    console.log(`Attempting to subscribe to ${topic}`);
     await connection.subscribe(
       topic,
       mqtt.QoS.AtLeastOnce,
@@ -38,6 +40,7 @@ async function connectToAWS() {
 
   return connection;
 }
+
 
 async function handleMessage(topic, payload) {
   try {
@@ -66,9 +69,10 @@ async function handleMessage(topic, payload) {
         console.log(message);
         await Logo.create(message);
         break;
-      // case "apm/fp":
-      //   await Fingerprint.create(message);
-      //   break;
+      case "apm/data":
+        console.log(message);
+        await SelfInstall.create(message);
+        break;
       default:
         console.log(`Unhandled topic: ${topic}`);
     }
