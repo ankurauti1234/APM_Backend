@@ -607,10 +607,12 @@ router.get("/self-installation", async (req, res) => {
         .json({ message: "device_id query parameter is required." });
     }
 
-    // Query the SelfInstall collection based on device_id
+    // Query the SelfInstall collection based on device_id, sorted by createdAt descending to get the latest entry
     const selfInstallationData = await SelfInstall.findOne({
       device_id: deviceId,
-    });
+    })
+      .sort({ createdAt: -1 }) // Sort by createdAt in descending order (latest first)
+      .exec();
 
     if (!selfInstallationData) {
       return res
@@ -635,6 +637,8 @@ router.get("/self-installation", async (req, res) => {
     res.status(500).json({ error: "An error occurred while fetching data." });
   }
 });
+
+
 
 
 
