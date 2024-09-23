@@ -22,6 +22,8 @@ router.get("/all", async (req, res) => {
       sim,
       installation,
       hw,
+      page = 1, // Default to page 1 if not provided
+      limit = 10, // Default to 10 items per page if not provided
     } = req.query;
 
     let query = {};
@@ -67,11 +69,23 @@ router.get("/all", async (req, res) => {
       query["CONFIGURATION.hardware_version"] = hw;
     }
 
-    // Fetch all devices based on the query and sort by LOCATION.TS descending
+    // Calculate the number of documents to skip for pagination
+    const skip = (page - 1) * limit;
+
+    // Fetch total count of devices matching the query
+    const totalCount = await Device.countDocuments(query);
+
+    // Fetch devices with pagination and sort by LOCATION.TS descending
     const devices =
       Object.keys(query).length === 0
-        ? await Device.find().sort({ "LOCATION.TS": -1 })
-        : await Device.find(query).sort({ "LOCATION.TS": -1 });
+        ? await Device.find()
+            .sort({ "LOCATION.TS": -1 })
+            .skip(skip)
+            .limit(Number(limit))
+        : await Device.find(query)
+            .sort({ "LOCATION.TS": -1 })
+            .skip(skip)
+            .limit(Number(limit));
 
     // Get all device IDs to fetch corresponding data
     const deviceIds = devices.map((device) => device.DEVICE_ID);
@@ -157,13 +171,16 @@ router.get("/all", async (req, res) => {
     // Sort the results by TS in descending order
     const sortedResults = results.sort((a, b) => b.TS - a.TS);
 
-    res.json(sortedResults);
+    // Send the paginated results along with the total count
+    res.json({
+      totalCount,
+      results: sortedResults,
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "An error occurred while fetching data." });
   }
 });
-
 
 router.get("/latest", async (req, res) => {
   try {
@@ -179,7 +196,19 @@ router.get("/latest", async (req, res) => {
       sim,
       installation,
       hw,
+      page = 1,
+      pageSize = 10,
     } = req.query;
+
+    // Convert page and pageSize to integers
+    const pageNum = parseInt(page, 10);
+    const pageSizeNum = parseInt(pageSize, 10);
+
+    if (pageNum < 1 || pageSizeNum < 1) {
+      return res
+        .status(400)
+        .json({ message: "Invalid page or pageSize parameter." });
+    }
 
     let matchQuery = {};
 
@@ -221,6 +250,18 @@ router.get("/latest", async (req, res) => {
     if (hw) {
       matchQuery["CONFIGURATION.hardware_version"] = hw;
     }
+
+    // Calculate skip and limit
+    const skip = (pageNum - 1) * pageSizeNum;
+
+    // Count total documents matching the criteria
+    const totalCount = await Device.aggregate([
+      { $match: matchQuery },
+      { $group: { _id: "$DEVICE_ID" } },
+      { $count: "total" },
+    ]);
+
+    const total = totalCount.length > 0 ? totalCount[0].total : 0;
 
     // Fetch the latest document for each DEVICE_ID matching the criteria
     const latestDevices = await Device.aggregate([
@@ -369,6 +410,9 @@ router.get("/latest", async (req, res) => {
           },
         },
       },
+      // Add pagination stages
+      { $skip: skip },
+      { $limit: pageSizeNum },
     ]);
 
     if (latestDevices.length === 0) {
@@ -377,12 +421,14 @@ router.get("/latest", async (req, res) => {
         .json({ message: "No devices found matching the criteria." });
     }
 
-    res.json(latestDevices);
+    res.json({ totalCount: total, results: latestDevices });
   } catch (error) {
     console.error("Error fetching data:", error);
     res.status(500).json({ error: "An error occurred while fetching data." });
   }
 });
+
+
 
 
 router.get("/live", async (req, res) => {
@@ -637,134 +683,6 @@ router.get("/self-installation", async (req, res) => {
     res.status(500).json({ error: "An error occurred while fetching data." });
   }
 });
-
-
-
-
-
-
-// router.get("/live", async (req, res) => {
-//   try {
-//     const {
-//       deviceIdMin,
-//       deviceIdMax,
-//       deviceId,
-//       lat,
-//       lon,
-//       online,
-//       hhid,
-//       locationInstalling,
-//       sim,
-//       installation,
-//       hw,
-//     } = req.query;
-
-//     let matchQuery = {};
-
-//     // Build the match query based on provided parameters
-//     if (deviceId) {
-//       matchQuery["DEVICE_ID"] = Number(deviceId);
-//     } else if (deviceIdMin && deviceIdMax) {
-//       matchQuery["DEVICE_ID"] = {
-//         $gte: Number(deviceIdMin),
-//         $lte: Number(deviceIdMax),
-//       };
-//     }
-
-//     if (lat && lon) {
-//       matchQuery["LOCATION.Cell_Info.lat"] = Number(lat);
-//       matchQuery["LOCATION.Cell_Info.lon"] = Number(lon);
-//     }
-
-//     if (online !== undefined) {
-//       matchQuery["NETWORK_LATCH.Ip_up"] = online === "true";
-//     }
-
-//     if (hhid) {
-//       matchQuery["METER_INSTALLATION.HHID"] = hhid;
-//     }
-
-//     if (locationInstalling !== undefined) {
-//       matchQuery["LOCATION.Installing"] = locationInstalling === "true";
-//     }
-
-//     if (sim) {
-//       matchQuery["NETWORK_LATCH.Sim"] = sim;
-//     }
-
-//     if (installation !== undefined) {
-//       matchQuery["METER_INSTALLATION.Success"] = installation === "true";
-//     }
-
-//     if (hw) {
-//       matchQuery["CONFIGURATION.hardware_version"] = hw;
-//     }
-
-//     console.log("Match Query:", matchQuery); // Debugging
-
-//     // Access the native MongoDB driver through Mongoose
-//     const db = mongoose.connection.db;
-
-//     // Fetch the last 10 logo accuracies based on the criteria
-//     const latestLogoAccuracies = await db
-//       .collection("Accuracy")
-//       .aggregate([
-//         { $match: matchQuery }, // Match the query criteria
-//         { $sort: { Timestamp: -1 } }, // Sort by timestamp in descending order to get latest entries first
-//         { $limit: 10 }, // Limit to the last 10 entries
-//         {
-//           $lookup: {
-//             from: "logos",
-//             localField: "LogoResult",
-//             foreignField: "Channel_ID",
-//             as: "LogoData",
-//           },
-//         },
-//         {
-//           $unwind: "$LogoData", // Unwind the LogoData array
-//         },
-//         {
-//           $lookup: {
-//             from: "AFPResult",
-//             localField: "AFPResult",
-//             foreignField: "Channel_ID",
-//             as: "AFPData",
-//           },
-//         },
-//         {
-//           $unwind: "$AFPData", // Unwind the AFPData array
-//         },
-//         {
-//           $project: {
-//             _id: 0,
-//             device_id: "$LogoData.device_id",
-//             audio_logo: "$AFPData.Channel_ID", // Get audio logo channel ID from AFPResult
-//             logo_logo: "$LogoData.Channel_ID", // Get logo channel ID from logos
-//             priority: "$Priority",
-//             ts: "$Timestamp",
-//             logo_accuracy: "$LogoData.accuracy",
-//             afp_time: "$AFPData.time", // Get time from AFPResult
-//           },
-//         },
-//         { $sort: { ts: -1 } }, // Ensure the sorting is by timestamp in descending order in the final output
-//       ])
-//       .toArray(); // Convert aggregation cursor to an array
-
-//     console.log("Latest Logo Accuracies:", latestLogoAccuracies); // Debugging
-
-//     if (latestLogoAccuracies.length === 0) {
-//       return res
-//         .status(404)
-//         .json({ message: "No logo accuracies found matching the criteria." });
-//     }
-
-//     res.json(latestLogoAccuracies);
-//   } catch (error) {
-//     console.error("Error fetching data:", error);
-//     res.status(500).json({ error: "An error occurred while fetching data." });
-//   }
-// });
-
 
 router.get("/alerts", async (req, res) => {
   try {

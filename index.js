@@ -7,7 +7,13 @@ const authRoutes = require("./routes/authRoutes");
 const searchRoutes = require("./routes/searchRoutes");
 const locationRoutes = require("./routes/locationRoutes");
 const userRoutes = require("./routes/userRoutes");
+const dataRoutes = require("./routes/dataRoutes");
 const mqttService = require("./services/mqttService");
+const swaggerUi = require("swagger-ui-express");
+const swaggerSpec = require("./swaggerConfig");
+
+
+
 
 const app = express();
 
@@ -23,12 +29,16 @@ app.use(
   })
 );
 
+// Middleware to serve Swagger UI
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
 // Route setup
 app.use("/mqtt", mqttRoutes);
 app.use("/auth", authRoutes);
 app.use("/user", userRoutes);
 app.use("/search", searchRoutes);
 app.use("/location", locationRoutes);
+app.use("/data", dataRoutes);
 
 // Error handling for 404
 app.use((req, res, next) => {

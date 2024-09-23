@@ -4,6 +4,8 @@ const config = require("../config/mqtt"); // Adjusted import based on provided s
 const DeviceData = require("../models/deviceData");
 const Logo = require("../models/logo");
 const SelfInstall = require("../models/selfInstallation");
+const Sensor = require("../models/sensorModel");
+const Proximity = require("../models/proximityModel");
 
 let client;
 
@@ -41,7 +43,6 @@ async function connectToAWS() {
   return connection;
 }
 
-
 async function handleMessage(topic, payload) {
   try {
     let message;
@@ -72,6 +73,20 @@ async function handleMessage(topic, payload) {
       case "apm/data":
         console.log(message);
         await SelfInstall.create(message);
+        break;
+      case "esp32/sensors":
+        console.log(message);
+        await Sensor.create({
+          distance: message.distance,
+          timestamp: new Date(),
+        });
+        break;
+      case "esp32/sensors/proximity":
+        console.log(message);
+        await Proximity.create({
+          object_detected: message.object_detected,
+          timestamp: new Date(),
+        });
         break;
       default:
         console.log(`Unhandled topic: ${topic}`);
